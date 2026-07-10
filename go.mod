@@ -23,7 +23,7 @@ require (
 	github.com/yudai/gojsondiff v1.0.0
 	go.yaml.in/yaml/v4 v4.0.0-rc.4
 	golang.org/x/sync v0.20.0
-	golang.org/x/sys v0.42.0
+	golang.org/x/sys v0.45.0
 )
 
 require (
@@ -69,7 +69,7 @@ require (
 	github.com/sergi/go-diff v1.4.0 // indirect; go1.12 thinks it needs this
 	github.com/yudai/golcs v0.0.0-20170316035057-ecda9a501e82 // indirect; go1.12 thinks it needs this
 	github.com/yudai/pp v2.0.1+incompatible // indirect
-	golang.org/x/crypto v0.49.0 // indirect
-	golang.org/x/text v0.35.0
+	golang.org/x/crypto v0.52.0 // indirect
+	golang.org/x/text v0.37.0
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
