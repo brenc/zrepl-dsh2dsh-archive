@@ -97,7 +97,10 @@ Total statement coverage is about 20%, and lowest where data safety lives:
 
 Any change to send, receive, replication planning, pruning or dataset
 filtering needs new tests for the changed behavior, and verification on a
-throwaway ZFS pool before it ships.
+throwaway ZFS pool before it ships. `fork/testpool.ts` (Bun, Linux and
+FreeBSD) builds one: file-backed source and destination pools, a push/sink
+config over localhost HTTP, and a `verify` command that checks every
+dataset replicated or stayed excluded as intended. Pool commands need root.
 
 Run the race detector too: `CGO_ENABLED=1 go test -race ./...`. Upstream
 never does (it builds with cgo off), and as of `afc56a6f` it fails in
