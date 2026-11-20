@@ -69,6 +69,8 @@ repo](https://copr.fedorainfracloud.org/coprs/fluoros/zrepl/). Thanks to
         # and nobody else.
   ```
 
+  `/health` endpoint just returns `200 OK` HTTP status.
+
 * All transports has been replaced by `local` and `http` transports.
 
   `local` transport configuration looks almost the same:
@@ -178,12 +180,27 @@ repo](https://copr.fedorainfracloud.org/coprs/fluoros/zrepl/). Thanks to
           recursive: true
         - pattern: "tank/foo"     # rule (2)
           exclude: true
-          recursive: true
         - pattern: "tank/foo/bar" # rule (3)
   ```
 
+  `tank/foo` is directly excluded by (2).
+
   `tank/foo/bar/loo` is excluded by (2), because (3) isn't matched (it isn't
-  recursive).
+  recursive) and (2) is recursive, because `exclude: true` is recursive by
+  default (it excludes this dataset and any of its children). But if would
+  change rule (2) to something like:
+
+  ```yaml
+  - pattern: "tank/foo" # rule (2)
+    exclude: true
+    recursive: false
+  ```
+
+  it'd exclude `tank/foo` as before, but instead include any children dataset,
+  because rules (1) is recursive.
+
+  So the rule is: `exclude: true` is recursive by default, but it can be changed
+  by using `recursive: false`.
 
   `tank/bar` is included by (1).
 
@@ -530,7 +547,9 @@ repo](https://copr.fedorainfracloud.org/coprs/fluoros/zrepl/). Thanks to
 
   See also zrepl/zrepl#780
 
-* New optional `pre` and `post` hooks for `push` and `pull` jobs. Example:
+* New optional `pre` and `post` hooks for active and passive jobs.
+
+  An example of `push` job with `pre` and `post` hooks:
 
   ```yaml
   - name: "zroot-to-zdisk"
@@ -552,7 +571,7 @@ repo](https://copr.fedorainfracloud.org/coprs/fluoros/zrepl/). Thanks to
         timeout: "0s"           # without timeout at all
   ```
 
-  This configuration runs `/root/bin/zrepl_hook.sh pre` before replication with
+  This configuration runs `/root/bin/zrepl_hook.sh pre` before snapshotting with
   environment variables:
 
   ```
@@ -574,6 +593,19 @@ repo](https://copr.fedorainfracloud.org/coprs/fluoros/zrepl/). Thanks to
 
   The `post` hook sets `ZREPL_JOB_ERR` to the last error. It's empty if the job
   finished without errors.
+
+  Passive jobs (`sink` and `source`) can have hooks too. Active jobs (`push` and
+  `pull`) remote execute it right before and after replication. If an active job
+  has their own hooks, before snapshotting it executes their `pre` hook and
+  remote `pre` hook after. After replication it executes remote `post` hook and
+  their `post` hook after pruning.
+
+  Passive jobs run their hooks with additional environment variables:
+  `ZREPL_CLIENT_IDENTITY`, `ZREPL_CLIENT_ROOT` and `ZREPL_JOB_ROOT`.
+  `ZREPL_REMOTE_SNAPSHOTS` contains list of snapshots created on remote side.
+  `ZREPL_REMOTE_REPLICATED` contains list of snapshots replicated from remote
+  side. The `source` job adds `ZREPL_LOCAL_SNAPSHOTS` env with list of
+  snapshots, created last time.
 
 * The pruning now prunes filesystems concurrently.
 
@@ -701,6 +733,66 @@ repo](https://copr.fedorainfracloud.org/coprs/fluoros/zrepl/). Thanks to
     type: "periodic"
     interval: "manual"
   ```
+
+* Implement `zfs send -R` for recursive datasets
+
+  ```yaml
+  - name: "test"
+    type: "push"
+    datasets:
+      - pattern: "zroot/test"
+        recursive: true
+    replication:
+      recursive: true
+  ```
+
+  Instead of `zfs send` of dataset `zroot/test` and every its descendent dataset
+  one by one, that configuration will use `zfs send -R ... zroot/test` and
+  generate a replication stream package, which will replicate `zroot/test`, and
+  all descendent datasets. When received, all properties, snapshots, descendent
+  file systems, and clones are preserved.
+
+  This block
+
+  ```yaml
+  replication:
+    recursive: true
+  ```
+
+  enables `zfs send -R` for every `pattern` from `datasets`, which has
+
+  `recursive: true`
+
+  For excluded descendent datasets it adds `-X dataset[,dataset]...`. More
+  datasets can be excluded using job configuration like this:
+
+  ```yaml
+  send:
+    exclude:
+      - "zroot/test/exclude1"
+      - "zroot/test/exclude2"
+  ```
+
+  and so on.
+
+  Recursive replication has some issues. See
+  https://github.com/dsh2dsh/zrepl/issues/73 for details.
+
+* Optional use of `-F` flag for `zfs recv`
+
+  ``` yaml
+  jobs:
+    - name: "zroot-to-zdisk"
+      type: "push"
+      replication:
+        force: true
+  ```
+
+  With configuration like that the receiver side runs `zfs recv -F`.
+
+* Skip undestroyable snapshots from pruning
+
+  Now pruning skips snapshots with holds or clones and logs it.
 
 ## Upstream user documentation
 

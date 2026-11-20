@@ -2,8 +2,8 @@ package monitor
 
 import (
 	"github.com/dsh2dsh/zrepl/internal/config"
-	"github.com/dsh2dsh/zrepl/internal/daemon/filters"
-	"github.com/dsh2dsh/zrepl/internal/zfs"
+	"github.com/dsh2dsh/zrepl/internal/zfs/dataset"
+	"github.com/dsh2dsh/zrepl/internal/zfs/filter"
 )
 
 func CountRulesFromConfig(in []config.MonitorCount) ([]*CountRule, error) {
@@ -26,12 +26,12 @@ func NewCountRule(m *config.MonitorCount) (*CountRule, error) {
 type CountRule struct {
 	*config.MonitorCount
 
-	skip *filters.DatasetFilter
+	skip *filter.Filter
 }
 
 func (self *CountRule) init() (*CountRule, error) {
 	if length := len(self.SkipDatasets); length != 0 {
-		skip := filters.New(length)
+		skip := filter.New(length)
 		if err := skip.AddList(self.SkipDatasets); err != nil {
 			return nil, err
 		}
@@ -40,9 +40,9 @@ func (self *CountRule) init() (*CountRule, error) {
 	return self, nil
 }
 
-func (self *CountRule) Skip(path *zfs.DatasetPath) (bool, error) {
+func (self *CountRule) Skip(path *dataset.Path) (bool, error) {
 	if self.skip != nil {
-		return self.skip.Filter(path)
+		return self.skip.Included(path)
 	}
 	return false, nil
 }
@@ -69,12 +69,12 @@ func NewAgeRule(m *config.MonitorCreation) (*AgeRule, error) {
 type AgeRule struct {
 	*config.MonitorCreation
 
-	skip *filters.DatasetFilter
+	skip *filter.Filter
 }
 
 func (self *AgeRule) init() (*AgeRule, error) {
 	if length := len(self.SkipDatasets); length != 0 {
-		skip := filters.New(length)
+		skip := filter.New(length)
 		if err := skip.AddList(self.SkipDatasets); err != nil {
 			return nil, err
 		}
@@ -83,9 +83,9 @@ func (self *AgeRule) init() (*AgeRule, error) {
 	return self, nil
 }
 
-func (self *AgeRule) Skip(path *zfs.DatasetPath) (bool, error) {
+func (self *AgeRule) Skip(path *dataset.Path) (bool, error) {
 	if self.skip != nil {
-		return self.skip.Filter(path)
+		return self.skip.Included(path)
 	}
 	return false, nil
 }

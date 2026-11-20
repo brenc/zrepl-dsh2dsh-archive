@@ -18,16 +18,17 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	"github.com/dsh2dsh/zrepl/internal/daemon/filters"
 	"github.com/dsh2dsh/zrepl/internal/logger"
 	"github.com/dsh2dsh/zrepl/internal/replication/logic/pdu"
 	"github.com/dsh2dsh/zrepl/internal/util/chainlock"
 	"github.com/dsh2dsh/zrepl/internal/zfs"
+	"github.com/dsh2dsh/zrepl/internal/zfs/dataset"
+	"github.com/dsh2dsh/zrepl/internal/zfs/filter"
 	zfsprop "github.com/dsh2dsh/zrepl/internal/zfs/property"
 )
 
 type SenderConfig struct {
-	FSF   *filters.DatasetFilter
+	FSF   *filter.Filter
 	JobID JobID
 
 	ListPlaceholders bool
@@ -40,6 +41,7 @@ type SenderConfig struct {
 	SendCompressed       bool
 	SendEmbeddedData     bool
 	SendSaved            bool
+	SendExclude          []string
 
 	ExecPipe [][]string
 }
@@ -54,7 +56,7 @@ func (c *SenderConfig) Validate() error {
 
 // Sender implements replication.ReplicationEndpoint for a sending side
 type Sender struct {
-	FSFilter *filters.DatasetFilter
+	FSFilter *filter.Filter
 	jobId    JobID
 	config   SenderConfig
 
@@ -85,15 +87,15 @@ func (s *Sender) WithPruneConcurrency(n int) *Sender {
 	return s
 }
 
-func (s *Sender) filterCheckFS(fs string) (*zfs.DatasetPath, error) {
-	dp, err := zfs.NewDatasetPath(fs)
+func (s *Sender) filterCheckFS(fs string) (*dataset.Path, error) {
+	dp, err := dataset.NewPath(fs)
 	if err != nil {
 		return nil, err
 	}
 	if dp.Length() == 0 {
 		return nil, errors.New("empty filesystem not allowed")
 	}
-	pass, err := s.FSFilter.Filter(dp)
+	pass, err := s.FSFilter.Included(dp)
 	if err != nil {
 		return nil, err
 	}
@@ -107,8 +109,7 @@ func (s *Sender) ListFilesystems(ctx context.Context) (*pdu.ListFilesystemRes,
 	error,
 ) {
 	if root := s.FSFilter.SingleRecursiveDataset(); root != nil {
-		return listFilesystemsRecursive(ctx, root, true,
-			zfs.PlaceholderPropertyName)
+		return s.listFilesystemsRecursive(ctx, root)
 	}
 
 	fss, err := zfs.ZFSListMapping(ctx, s.FSFilter)
@@ -119,7 +120,10 @@ func (s *Sender) ListFilesystems(ctx context.Context) (*pdu.ListFilesystemRes,
 	rfss := make([]*pdu.Filesystem, len(fss))
 	for i, p := range fss {
 		rfss[i] = &pdu.Filesystem{
-			Path: p.ToString(),
+			Path:       p.ToString(),
+			Replicate:  p.Recursive(),
+			Exclude:    p.ExcludedString(),
+			Replicated: p.RecursiveParent() != nil,
 			// ResumeToken does not make sense from Sender.
 		}
 	}
@@ -129,12 +133,31 @@ func (s *Sender) ListFilesystems(ctx context.Context) (*pdu.ListFilesystemRes,
 			return nil, err
 		}
 	}
+
 	res := &pdu.ListFilesystemRes{Filesystems: rfss}
 	return res, nil
 }
 
-func (s *Sender) listPlaceholders(ctx context.Context, fss []*zfs.DatasetPath,
-	rfss []*pdu.Filesystem,
+func (s *Sender) listFilesystemsRecursive(ctx context.Context,
+	root *dataset.Path,
+) (*pdu.ListFilesystemRes, error) {
+	res, err := listFilesystemsRecursive(ctx, root, true,
+		zfs.PlaceholderPropertyName)
+	if err != nil {
+		return nil, err
+	} else if len(res.Filesystems) < 2 {
+		return res, nil
+	}
+
+	res.Filesystems[0].Replicate = true
+	for i := 1; i < len(res.Filesystems); i++ {
+		res.Filesystems[i].Replicated = true
+	}
+	return res, nil
+}
+
+func (s *Sender) listPlaceholders(ctx context.Context,
+	fss []*dataset.Path, rfss []*pdu.Filesystem,
 ) error {
 	concurrency := runtime.GOMAXPROCS(0)
 	getLogger(ctx).
@@ -220,25 +243,27 @@ func (s *Sender) sendMakeArgs(ctx context.Context, r *pdu.SendReq) (sendArgs zfs
 		return sendArgs, err
 	}
 
-	sendArgsUnvalidated := zfs.ZFSSendArgsUnvalidated{
+	unvalidated := zfs.ZFSSendArgsUnvalidated{
+		ResumeToken:      r.ResumeToken, // nil or not nil, depending on decoding success
+		Encrypted:        s.config.Encrypt,
+		Properties:       s.config.SendProperties,
+		BackupProperties: s.config.SendBackupProperties,
+		Raw:              s.config.SendRaw,
+		LargeBlocks:      s.config.SendLargeBlocks,
+		Compressed:       s.config.SendCompressed,
+		EmbeddedData:     s.config.SendEmbeddedData,
+		Saved:            s.config.SendSaved,
+		Multi:            r.Multi,
+		Replicate:        r.Replicate,
+		Exclude:          r.Exclude,
+
 		FS:   r.Filesystem,
 		From: uncheckedSendArgsFromPDU(r.GetFrom()), // validated by zfs.ZFSSendDry / zfs.ZFSSend
 		To:   uncheckedSendArgsFromPDU(r.GetTo()),   // validated by zfs.ZFSSendDry / zfs.ZFSSend
-		ZFSSendFlags: zfs.ZFSSendFlags{
-			ResumeToken:      r.ResumeToken, // nil or not nil, depending on decoding success
-			Encrypted:        s.config.Encrypt,
-			Properties:       s.config.SendProperties,
-			BackupProperties: s.config.SendBackupProperties,
-			Raw:              s.config.SendRaw,
-			LargeBlocks:      s.config.SendLargeBlocks,
-			Compressed:       s.config.SendCompressed,
-			EmbeddedData:     s.config.SendEmbeddedData,
-			Saved:            s.config.SendSaved,
-			Multi:            r.Multi,
-		},
 	}
+	unvalidated.AppendExclude(s.config.SendExclude)
 
-	sendArgs, err = sendArgsUnvalidated.Validate(ctx)
+	sendArgs, err = unvalidated.Validate(ctx)
 	if err != nil {
 		return sendArgs, fmt.Errorf("validate send arguments: %w", err)
 	}
@@ -319,7 +344,7 @@ func (s *Sender) Send(ctx context.Context, r *pdu.SendReq) (*pdu.SendRes,
 	// NB: there is no abstraction for snapshots, so, we only need to check
 	// bookmarks.
 	if sendArgs.FromVersion != nil && sendArgs.FromVersion.IsBookmark() {
-		dp, err := zfs.NewDatasetPath(sendArgs.FS)
+		dp, err := dataset.NewPath(sendArgs.FS)
 		if err != nil {
 			panic(err) // sendArgs is validated, this shouldn't happen
 		}
@@ -556,7 +581,7 @@ func (*Sender) Receive(ctx context.Context, r *pdu.ReceiveReq, _ io.ReadCloser,
 type ReceiverConfig struct {
 	JobID JobID
 
-	RootWithoutClientComponent *zfs.DatasetPath
+	RootWithoutClientComponent *dataset.Path
 	AppendClientIdentity       bool
 
 	InheritProperties  []zfsprop.Property
@@ -649,7 +674,7 @@ func (s *Receiver) WithPruneConcurrency(n int) *Receiver {
 	return s
 }
 
-func (s *Receiver) clientRootFromCtx(ctx context.Context) *zfs.DatasetPath {
+func (s *Receiver) clientRootFromCtx(ctx context.Context) *dataset.Path {
 	if !s.conf.AppendClientIdentity {
 		return s.conf.RootWithoutClientComponent.Copy()
 	}
@@ -666,7 +691,7 @@ func (s *Receiver) clientRootFromCtx(ctx context.Context) *zfs.DatasetPath {
 		clientIdentity = identity
 	}
 
-	clientRoot, err := clientRoot(s.conf.RootWithoutClientComponent,
+	clientRoot, err := ClientRoot(s.conf.RootWithoutClientComponent,
 		clientIdentity)
 	if err != nil {
 		err = fmt.Errorf(
@@ -677,15 +702,17 @@ func (s *Receiver) clientRootFromCtx(ctx context.Context) *zfs.DatasetPath {
 	return clientRoot
 }
 
-func clientRoot(rootFS *zfs.DatasetPath, clientIdentity string) (*zfs.DatasetPath, error) {
-	rootFSLen := rootFS.Length()
+func ClientRoot(rootFS *dataset.Path, clientIdentity string,
+) (*dataset.Path, error) {
 	clientRootStr := path.Join(rootFS.ToString(), clientIdentity)
-	clientRoot, err := zfs.NewDatasetPath(clientRootStr)
+	clientRoot, err := dataset.NewPath(clientRootStr)
 	if err != nil {
 		return nil, err
 	}
-	if rootFSLen+1 != clientRoot.Length() {
-		return nil, errors.New("client identity must be a single ZFS filesystem path component")
+
+	if clientRoot.Length() != rootFS.Length()+1 {
+		return nil, errors.New(
+			"client identity must be a single ZFS filesystem path component")
 	}
 	return clientRoot, nil
 }
@@ -699,7 +726,7 @@ func (s *Receiver) ListFilesystems(ctx context.Context) (*pdu.ListFilesystemRes,
 		zfs.PlaceholderPropertyName, receiveResumeToken)
 }
 
-func listFilesystemsRecursive(ctx context.Context, root *zfs.DatasetPath,
+func listFilesystemsRecursive(ctx context.Context, root *dataset.Path,
 	includingRoot bool, props ...string,
 ) (*pdu.ListFilesystemRes, error) {
 	rootStr := root.ToString()
@@ -734,7 +761,7 @@ func listFilesystemsRecursive(ctx context.Context, root *zfs.DatasetPath,
 	return &pdu.ListFilesystemRes{Filesystems: fss}, nil
 }
 
-func makeFilesystems(ctx context.Context, root *zfs.DatasetPath,
+func makeFilesystems(ctx context.Context, root *dataset.Path,
 	includingRoot bool, items []*zfs.ZFSProperties,
 ) ([]*pdu.Filesystem, error) {
 	// present filesystem without the root_fs prefix
@@ -800,8 +827,10 @@ func (s *Receiver) ListFilesystemVersions(ctx context.Context,
 	return &pdu.ListFilesystemVersionsRes{Versions: rfsvs}, nil
 }
 
-func mapToLocal(root *zfs.DatasetPath, fs string) (*zfs.DatasetPath, error) {
-	p, err := zfs.NewDatasetPath(fs)
+func mapToLocal(root *dataset.Path, fs string) (*dataset.Path,
+	error,
+) {
+	p, err := dataset.NewPath(fs)
 	if err != nil {
 		return nil, err
 	}
@@ -830,7 +859,7 @@ func (s *Receiver) SendDry(ctx context.Context, req *pdu.SendDryReq,
 	return nil, errors.New("receiver does not implement SendDry()")
 }
 
-func (s *Receiver) receive_GetPlaceholderCreationEncryptionValue(client_root, path *zfs.DatasetPath) (zfs.FilesystemPlaceholderCreateEncryptionValue, error) {
+func (s *Receiver) receive_GetPlaceholderCreationEncryptionValue(client_root, path *dataset.Path) (zfs.FilesystemPlaceholderCreateEncryptionValue, error) {
 	if !s.conf.PlaceholderEncryption.IsAPlaceholderCreationEncryptionProperty() {
 		panic(s.conf.PlaceholderEncryption)
 	}
@@ -889,10 +918,10 @@ func (s *Receiver) Receive(ctx context.Context, req *pdu.ReceiveReq,
 		getLogger(ctx).Debug("end acquire recvParentCreationMtx")
 		defer getLogger(ctx).Debug("release recvParentCreationMtx")
 
-		f := zfs.NewDatasetPathForest()
+		f := dataset.NewPathForest()
 		f.Add(lp)
 		getLogger(ctx).Debug("begin tree-walk")
-		f.WalkTopDown(func(v *zfs.DatasetPathVisit) (visitChildTree bool) {
+		f.WalkTopDown(func(v *dataset.PathVisit) (visitChildTree bool) {
 			if v.Path.Equal(lp) {
 				return false
 			}
@@ -986,6 +1015,7 @@ func (s *Receiver) Receive(ctx context.Context, req *pdu.ReceiveReq,
 		SavePartialRecvState: true,
 		InheritProperties:    s.conf.InheritProperties,
 		OverrideProperties:   s.conf.OverrideProperties,
+		Force:                req.GetReplicationConfig().Force,
 	}
 
 	var clearPlaceholderProperty bool

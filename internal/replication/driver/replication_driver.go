@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -17,7 +18,7 @@ import (
 	"github.com/dsh2dsh/zrepl/internal/logger"
 	"github.com/dsh2dsh/zrepl/internal/replication/report"
 	"github.com/dsh2dsh/zrepl/internal/util/chainlock"
-	"github.com/dsh2dsh/zrepl/internal/zfs"
+	"github.com/dsh2dsh/zrepl/internal/zfs/dataset"
 )
 
 type interval struct {
@@ -430,8 +431,8 @@ func (a *attempt) doGlobalPlanning(ctx context.Context, prev *attempt,
 
 	// build up parent-child relationship (FIXME (O(n^2), but who's going to have
 	// that many filesystems...))
-	mustDatasetPathOrPlanFail := func(fs string) *zfs.DatasetPath {
-		dp, err := zfs.NewDatasetPath(fs)
+	mustDatasetPathOrPlanFail := func(fs string) *dataset.Path {
+		dp, err := dataset.NewPath(fs)
 		if err != nil {
 			now := time.Now()
 			a.planErr = newTimedError(fmt.Errorf("%q: %w", fs, err), now)
@@ -566,8 +567,8 @@ func (f *fs) do(ctx context.Context, pq *stepQueue, prev *fs) {
 			target.prev = -1
 			target.cur = -1
 		out:
-			for p := len(prevUncompleted) - 1; p >= 0; p-- {
-				for q := len(f.planned.steps) - 1; q >= 0; q-- {
+			for p := range slices.Backward(prevUncompleted) {
+				for q := range slices.Backward(f.planned.steps) {
 					if prevUncompleted[p].step.TargetEquals(f.planned.steps[q].step) {
 						target.prev = p
 						target.cur = q

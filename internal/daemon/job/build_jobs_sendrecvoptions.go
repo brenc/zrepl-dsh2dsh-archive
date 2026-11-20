@@ -5,9 +5,9 @@ import (
 	"fmt"
 
 	"github.com/dsh2dsh/zrepl/internal/config"
-	"github.com/dsh2dsh/zrepl/internal/daemon/filters"
 	"github.com/dsh2dsh/zrepl/internal/endpoint"
-	"github.com/dsh2dsh/zrepl/internal/zfs"
+	"github.com/dsh2dsh/zrepl/internal/zfs/dataset"
+	"github.com/dsh2dsh/zrepl/internal/zfs/filter"
 )
 
 type SendingJobConfig interface {
@@ -16,7 +16,7 @@ type SendingJobConfig interface {
 }
 
 func buildSenderConfig(in SendingJobConfig, jobID endpoint.JobID) (*endpoint.SenderConfig, error) {
-	fsf, err := filters.NewFromConfig(in.GetFilesystems())
+	fsf, err := filter.NewFromConfig(in.GetFilesystems())
 	if err != nil {
 		return nil, fmt.Errorf("cannot build filesystem filter: %w", err)
 	}
@@ -36,6 +36,7 @@ func buildSenderConfig(in SendingJobConfig, jobID endpoint.JobID) (*endpoint.Sen
 		SendCompressed:       sendOpts.Compressed,
 		SendEmbeddedData:     sendOpts.EmbeddedData,
 		SendSaved:            sendOpts.Saved,
+		SendExclude:          sendOpts.Exclude,
 
 		ExecPipe: sendOpts.ExecPipe,
 	}
@@ -55,7 +56,7 @@ type ReceivingJobConfig interface {
 
 func buildReceiverConfig(in ReceivingJobConfig, jobID endpoint.JobID,
 ) (rc endpoint.ReceiverConfig, err error) {
-	rootFs, err := zfs.NewDatasetPath(in.GetRootFS())
+	rootFs, err := dataset.NewPath(in.GetRootFS())
 	if err != nil {
 		return rc, errors.New("root_fs is not a valid zfs filesystem path")
 	} else if rootFs.Length() <= 0 {

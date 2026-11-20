@@ -3,20 +3,15 @@ package zfs
 import (
 	"context"
 	"fmt"
-	"iter"
 	"slices"
 
+	"github.com/dsh2dsh/zrepl/internal/zfs/dataset"
+	"github.com/dsh2dsh/zrepl/internal/zfs/filter"
 	"github.com/dsh2dsh/zrepl/internal/zfs/zfscmd"
 )
 
-type DatasetFilter interface {
-	Filter2(path *DatasetPath) (*DatasetPath, bool, error)
-	TopFilesystems() (int, iter.Seq[string])
-	UserSpecifiedDatasets() map[string]bool
-}
-
-func ZFSListMapping(ctx context.Context, filter DatasetFilter,
-) ([]*DatasetPath, error) {
+func ZFSListMapping(ctx context.Context, filter *filter.Filter,
+) ([]*dataset.Path, error) {
 	props := []string{"name", "written"}
 	args := []string{"-r", "-t", "filesystem,volume"}
 	n, pfs := filter.TopFilesystems()
@@ -26,12 +21,13 @@ func ZFSListMapping(ctx context.Context, filter DatasetFilter,
 	cmd := NewListCmd(ctx, props, args)
 
 	v, err, _ := sg.Do(cmd.String(), func() (any, error) {
-		datasets := []*DatasetPath{}
+		datasets := []*dataset.Path{}
 		for fields, err := range ListIter(ctx, props, nil, cmd) {
 			if err != nil {
 				return nil, err
 			}
-			path, err := NewDatasetPath(fields[0], WithWritten(fields[1]))
+			path, err := dataset.NewPath(fields[0],
+				dataset.WithWritten(fields[1]))
 			if err != nil {
 				return nil, err
 			}
@@ -43,73 +39,65 @@ func ZFSListMapping(ctx context.Context, filter DatasetFilter,
 	if err != nil {
 		return nil, err //nolint:wrapcheck // already wrapped
 	}
-	return filterDatasets(ctx, filter, v.([]*DatasetPath))
+	return filterDatasets(ctx, filter, v.([]*dataset.Path))
 }
 
-func filterDatasets(ctx context.Context, filter DatasetFilter,
-	all []*DatasetPath,
-) ([]*DatasetPath, error) {
-	var filterErr error
-	roots := newRecursiveDatasets()
-	unmatchedDatasets := filter.UserSpecifiedDatasets()
+func filterDatasets(ctx context.Context, filter *filter.Filter,
+	all []*dataset.Path,
+) ([]*dataset.Path, error) {
+	parents := newRecursiveDatasets()
+	unmatched := filter.UserSpecifiedDatasets()
 
-	datasets := []*DatasetPath{}
+	datasets := []*dataset.Path{}
 	for _, path := range all {
-		root, pass, err := filter.Filter2(path)
+		filtered, err := filter.Filtered(path)
 		if err != nil {
 			return nil, fmt.Errorf("error calling filter: %w", err)
 		}
-		roots.Add(root, path, pass)
-		if pass {
+
+		parents.Add(filtered.Parent(), path, filtered.Included())
+		if filtered.Included() {
 			datasets = append(datasets, path)
+		} else {
+			path.WithRecursive(filtered.Recursive())
 		}
-		delete(unmatchedDatasets, path.ToString())
+		delete(unmatched, path.ToString())
 	}
-	roots.UpdateChildren()
 
 	prom.ZFSListUnmatchedUserSpecifiedDatasetCount.
 		WithLabelValues(zfscmd.GetJobID(ctx)).
-		Add(float64(len(unmatchedDatasets)))
-	return datasets, filterErr
+		Add(float64(len(unmatched)))
+	return datasets, nil
 }
 
 // --------------------------------------------------
 
-func newRecursiveDatasets() recursiveDatasets {
-	return recursiveDatasets{
-		children: make(map[*DatasetPath][]*DatasetPath),
-		skip:     make(map[*DatasetPath]struct{}),
-	}
-}
-
 type recursiveDatasets struct {
-	children map[*DatasetPath][]*DatasetPath
-	skip     map[*DatasetPath]struct{}
+	parents map[*dataset.Path]*dataset.Path
 }
 
-func (self *recursiveDatasets) Add(root, path *DatasetPath, included bool) {
-	switch {
-	case self.skipped(root):
-	case included:
-		self.children[root] = append(self.children[root], path)
-	default:
-		delete(self.children, root)
-		self.skip[root] = struct{}{}
+func newRecursiveDatasets() recursiveDatasets {
+	return recursiveDatasets{parents: make(map[*dataset.Path]*dataset.Path)}
+}
+
+func (self *recursiveDatasets) Add(root, path *dataset.Path, included bool) {
+	if root == nil || !root.Recursive() {
+		return
 	}
-}
 
-func (self *recursiveDatasets) skipped(root *DatasetPath) bool {
-	if root == nil {
-		return true
-	}
-	_, ok := self.skip[root]
-	return ok
-}
-
-func (self *recursiveDatasets) UpdateChildren() {
-	for root, children := range self.children {
-		for _, p := range children {
-			p.SetRecursiveParent(root)
+	if path.Equal(root) {
+		path.WithRecursive(true)
+		self.parents[root] = path
+		if !included {
+			path.WithExcluded(path)
 		}
+		return
+	}
+
+	parent := self.parents[root]
+	if included {
+		path.SetRecursiveParent(parent)
+	} else {
+		parent.WithExcluded(path)
 	}
 }

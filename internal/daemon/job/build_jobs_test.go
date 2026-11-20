@@ -178,7 +178,7 @@ func TestSampleConfigsAreBuiltWithoutErrors(t *testing.T) {
 		}
 
 		t.Run(p, func(t *testing.T) {
-			c, err := config.ParseConfig(p)
+			c, err := config.ParseConfig(p, config.WithIncludeKeys())
 			if err != nil {
 				t.Fatalf("error parsing %s:\n%+v", p, err)
 			}
@@ -298,7 +298,7 @@ jobs:
 
 	for _, ts := range tests {
 		t.Run(ts.name, func(t *testing.T) {
-			assert.NotEqual(t, (ts.expectError), (ts.expectOk != nil))
+			assert.NotEqual(t, ts.expectError, (ts.expectOk != nil))
 
 			cstr := fill(ts.input)
 			t.Logf("testing config:\n%s", cstr)

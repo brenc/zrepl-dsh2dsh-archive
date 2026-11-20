@@ -24,7 +24,7 @@ var ConfigcheckCmd = &cli.Subcommand{
 	Use:   "configcheck",
 	Short: "check if config can be parsed without errors",
 
-	ConfigWithIncludes: true,
+	IncludeKeys: true,
 
 	SetupFlags: func(f *pflag.FlagSet) {
 		f.StringVar(&configcheckArgs.format, "format", "",
@@ -73,7 +73,13 @@ func checkConfig(subcommand *cli.Subcommand) error {
 			return fmt.Errorf("failed encode to json: %w", err)
 		}
 	case "yaml":
-		if err := yaml.NewEncoder(os.Stdout).Encode(c); err != nil {
+		enc, err := yaml.NewDumper(os.Stdout, yaml.WithV4Defaults(),
+			yaml.WithCompactSeqIndent(false),
+			yaml.WithQuotePreference(yaml.QuoteDouble))
+		if err != nil {
+			return fmt.Errorf("failed encode to yaml: %w", err)
+		}
+		if err := enc.Dump(c); err != nil {
 			return fmt.Errorf("failed encode to yaml: %w", err)
 		}
 	default:

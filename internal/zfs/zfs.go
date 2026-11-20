@@ -21,6 +21,7 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/dsh2dsh/zrepl/internal/logger"
+	"github.com/dsh2dsh/zrepl/internal/zfs/dataset"
 	zfsprop "github.com/dsh2dsh/zrepl/internal/zfs/property"
 	"github.com/dsh2dsh/zrepl/internal/zfs/zfscmd"
 )
@@ -74,15 +75,15 @@ func ZFSList(ctx context.Context, properties []string, zfsArgs ...string,
 	return res, nil
 }
 
-func ZFSListPaths(ctx context.Context) ([]*DatasetPath, error) {
-	paths := []*DatasetPath{}
+func ZFSListPaths(ctx context.Context) ([]*dataset.Path, error) {
+	paths := []*dataset.Path{}
 	zfsList := ZFSListIter(ctx, []string{"name"}, nil, "-r", "-t",
 		"filesystem,volume")
 	for fields, err := range zfsList {
 		if err != nil {
 			return nil, err
 		}
-		path, err := NewDatasetPath(fields[0])
+		path, err := dataset.NewPath(fields[0])
 		if err != nil {
 			return nil, err
 		}
@@ -96,7 +97,7 @@ func ZFSListPaths(ctx context.Context) ([]*DatasetPath, error) {
 // If notExistHint is not nil and zfs exits with an error, the stderr is
 // attempted to be interpreted as a *DatasetDoesNotExist error.
 func ZFSListIter(ctx context.Context, properties []string,
-	notExistHint *DatasetPath, zfsArgs ...string,
+	notExistHint *dataset.Path, zfsArgs ...string,
 ) iter.Seq2[[]string, error] {
 	return ListIter(ctx, properties, notExistHint,
 		NewListCmd(ctx, properties, zfsArgs))
@@ -332,6 +333,8 @@ type ZFSSendFlags struct {
 	EmbeddedData     bool
 	Saved            bool
 	Multi            bool
+	Replicate        bool
+	Exclude          string
 
 	// Preferred if not empty. If not nil, must match what is specified in From,
 	// To (covered by ValidateCorrespondsToResumeToken)
@@ -386,7 +389,7 @@ func ZFSSendArgsSkipValidation(ctx context.Context) context.Context {
 // datasets.
 func (a ZFSSendArgsUnvalidated) Validate(ctx context.Context,
 ) (v ZFSSendArgsValidated, _ error) {
-	if dp, err := NewDatasetPath(a.FS); err != nil || dp.Length() == 0 {
+	if dp, err := dataset.NewPath(a.FS); err != nil || dp.Length() == 0 {
 		return v, newGenericValidationError(a,
 			errors.New("`FS` must be a valid non-zero dataset path"))
 	}
@@ -453,51 +456,70 @@ func (a ZFSSendArgsUnvalidated) Validate(ctx context.Context,
 	return validated, nil
 }
 
-func (f ZFSSendFlags) Validate() error { return nil }
+func (self *ZFSSendFlags) AppendExclude(ex []string) {
+	if len(ex) == 0 {
+		return
+	}
+	s := strings.Join(ex, ",")
+
+	if self.Exclude == "" {
+		self.Exclude = s
+		return
+	}
+	self.Exclude += "," + s
+}
+
+func (self *ZFSSendFlags) Validate() error { return nil }
 
 // If ResumeToken is empty, builds a command line with the flags specified.
 // If ResumeToken is not empty, build a command line with just `-t {{.ResumeToken}}`.
 //
 // SECURITY SENSITIVE it is the caller's responsibility to ensure that a.Encrypted semantics
 // hold for the file system that will be sent with the send flags returned by this function
-func (a ZFSSendFlags) buildSendFlagsUnchecked() []string {
-	args := make([]string, 0, 10)
+func (self *ZFSSendFlags) buildSendFlagsUnchecked() []string {
+	args := make([]string, 0, 13)
 
 	// ResumeToken takes precedence, we assume that it has been validated
 	// to reflect what is described by the other fields.
-	if a.ResumeToken != "" {
-		args = append(args, "-t", a.ResumeToken)
+	if self.ResumeToken != "" {
+		args = append(args, "-t", self.ResumeToken)
 		return args
 	}
 
-	if a.Encrypted || a.Raw {
+	if self.Encrypted || self.Raw {
 		args = append(args, "-w")
 	}
 
-	if a.Properties {
+	if self.Properties {
 		args = append(args, "-p")
 	}
 
-	if a.BackupProperties {
+	if self.BackupProperties {
 		args = append(args, "-b")
 	}
 
-	if a.LargeBlocks {
+	if self.LargeBlocks {
 		args = append(args, "-L")
 	}
 
-	if a.Compressed {
+	if self.Compressed {
 		args = append(args, "-c")
 	}
 
-	if a.EmbeddedData {
+	if self.EmbeddedData {
 		args = append(args, "-e")
 	}
 
-	if a.Saved {
+	if self.Saved {
 		args = append(args, "-S")
 	}
 
+	if self.Replicate {
+		args = append(args, "-R")
+		if self.Exclude != "" {
+			args = append(args, "-X", self.Exclude)
+		}
+	}
 	return args
 }
 
@@ -853,6 +875,8 @@ type RecvOptions struct {
 	// Set -s flag used for resumable send & recv
 	SavePartialRecvState bool
 
+	Force bool // set -F flag
+
 	InheritProperties  []zfsprop.Property
 	OverrideProperties map[zfsprop.Property]string
 }
@@ -861,7 +885,7 @@ func (self *RecvOptions) buildRecvFlags() []string {
 	args := make([]string, 0,
 		2+len(self.InheritProperties)*2+len(self.OverrideProperties)*2)
 
-	if self.RollbackAndForceRecv {
+	if self.RollbackAndForceRecv || self.Force {
 		args = append(args, "-F")
 	}
 
@@ -894,7 +918,7 @@ func ZFSRecv(
 		return errors.New("must receive into a snapshot")
 	}
 
-	fsdp, err := NewDatasetPath(fs)
+	fsdp, err := dataset.NewPath(fs)
 	if err != nil {
 		return err
 	}
@@ -948,7 +972,7 @@ func ZFSRecv(
 	return nil
 }
 
-func zfsRollbackForceRecv(ctx context.Context, fsdp *DatasetPath) error {
+func zfsRollbackForceRecv(ctx context.Context, fsdp *dataset.Path) error {
 	snaps, err := ZFSListFilesystemVersions(ctx, fsdp,
 		ListFilesystemVersionsOptions{Types: Snapshots})
 	_, errNotExist := errors.AsType[*DatasetDoesNotExist](err)
@@ -1147,8 +1171,8 @@ func (p *ZFSProperties) Fs() string { return p.fs }
 
 func (p *ZFSProperties) Order() int { return p.order }
 
-func (p *ZFSProperties) DatasetPath() (*DatasetPath, error) {
-	return NewDatasetPath(p.fs)
+func (p *ZFSProperties) DatasetPath() (*dataset.Path, error) {
+	return dataset.NewPath(p.fs)
 }
 
 func zfsSet(ctx context.Context, path string, props map[string]string) error {
@@ -1172,11 +1196,11 @@ func zfsSet(ctx context.Context, path string, props map[string]string) error {
 	return nil
 }
 
-func ZFSSet(ctx context.Context, fs *DatasetPath, props map[string]string) error {
+func ZFSSet(ctx context.Context, fs *dataset.Path, props map[string]string) error {
 	return zfsSet(ctx, fs.ToString(), props)
 }
 
-func ZFSGet(ctx context.Context, fs *DatasetPath, props []string) (*ZFSProperties, error) {
+func ZFSGet(ctx context.Context, fs *dataset.Path, props []string) (*ZFSProperties, error) {
 	return zfsGet(ctx, fs.ToString(), props, SourceAny)
 }
 
@@ -1560,7 +1584,7 @@ func ZFSDestroyIdempotent(ctx context.Context, path string) error {
 	return nil
 }
 
-func ZFSSnapshot(ctx context.Context, fs *DatasetPath, name string,
+func ZFSSnapshot(ctx context.Context, fs *dataset.Path, name string,
 	recursive bool,
 ) error {
 	promTimer := prometheus.NewTimer(
@@ -1616,7 +1640,7 @@ func ZFSBookmark(ctx context.Context, fs string, v FilesystemVersion,
 	bm := FilesystemVersion{
 		Type:     Bookmark,
 		Name:     bookmark,
-		UserRefs: OptionUint64{Valid: false},
+		UserRefs: Optional[uint64]{Valid: false},
 		// bookmarks have the same createtxg, guid and creation as their origin
 		CreateTXG: v.CreateTXG,
 		Guid:      v.Guid,
@@ -1686,7 +1710,7 @@ func ZFSBookmark(ctx context.Context, fs string, v FilesystemVersion,
 	return bm, nil
 }
 
-func ZFSRollback(ctx context.Context, fs *DatasetPath,
+func ZFSRollback(ctx context.Context, fs *dataset.Path,
 	snapshot FilesystemVersion, rollbackArgs ...string,
 ) error {
 	snapabs := snapshot.ToAbsPath(fs)

@@ -1,10 +1,20 @@
 package job
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+	"log/slog"
+
+	"github.com/dsh2dsh/zrepl/internal/daemon/logging"
+	"github.com/dsh2dsh/zrepl/internal/replication/logic/pdu"
+)
 
 type Connected interface {
 	Name() string
 	Endpoint() Endpoint
+
+	PreHook(context.Context, *pdu.PassiveHookData) error
+	PostHook(context.Context, *pdu.PassiveHookData) error
 }
 
 func newLocalConnected(listenerName, clientIdentity string,
@@ -41,6 +51,24 @@ func (self *localConnected) job() *PassiveSide {
 	return j
 }
 
+func (self *localConnected) PreHook(ctx context.Context,
+	remote *pdu.PassiveHookData,
+) error {
+	return self.job().PreHook(self.hookContext(ctx), self.clientIdentity, remote)
+}
+
+func (self *localConnected) hookContext(ctx context.Context) context.Context {
+	log := GetLogger(ctx).With(
+		slog.String("client_identity", self.clientIdentity))
+	return logging.WithLogger(ctx, log)
+}
+
+func (self *localConnected) PostHook(ctx context.Context,
+	remote *pdu.PassiveHookData,
+) error {
+	return self.job().PostHook(self.hookContext(ctx), self.clientIdentity, remote)
+}
+
 func newServerConnected(name string, client *Client) *serverConnected {
 	return &serverConnected{name: name, client: client}
 }
@@ -55,3 +83,15 @@ var _ Connected = (*serverConnected)(nil)
 func (self *serverConnected) Name() string { return self.name }
 
 func (self *serverConnected) Endpoint() Endpoint { return self.client }
+
+func (self *serverConnected) PreHook(ctx context.Context,
+	remote *pdu.PassiveHookData,
+) error {
+	return self.client.PreHook(ctx, remote)
+}
+
+func (self *serverConnected) PostHook(ctx context.Context,
+	remote *pdu.PassiveHookData,
+) error {
+	return self.client.PostHook(ctx, remote)
+}

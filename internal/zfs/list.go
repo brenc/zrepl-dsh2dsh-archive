@@ -10,6 +10,7 @@ import (
 	"iter"
 	"strings"
 
+	"github.com/dsh2dsh/zrepl/internal/zfs/dataset"
 	"github.com/dsh2dsh/zrepl/internal/zfs/zfscmd"
 )
 
@@ -21,7 +22,7 @@ func NewListCmd(ctx context.Context, props, zfsArgs []string) *zfscmd.Cmd {
 }
 
 func ListIter(ctx context.Context, properties []string,
-	notExistHint *DatasetPath, cmd *zfscmd.Cmd,
+	notExistHint *dataset.Path, cmd *zfscmd.Cmd,
 ) iter.Seq2[[]string, error] {
 	cmd.WithLogError(false)
 	var stderrBuf bytes.Buffer
@@ -103,7 +104,7 @@ func maybeDatasetNotExists(cmd *zfscmd.Cmd, path string, err error) error {
 	return err
 }
 
-func listVersions(ctx context.Context, props []string, fs *DatasetPath,
+func listVersions(ctx context.Context, props []string, fs *dataset.Path,
 	cmd *zfscmd.Cmd,
 ) ([]FilesystemVersion, error) {
 	snaps := []FilesystemVersion{}
@@ -112,14 +113,14 @@ func listVersions(ctx context.Context, props []string, fs *DatasetPath,
 		if err != nil {
 			return nil, err
 		}
-		var args ParseFilesystemVersionArgs
-		v, err := args.
-			WithFullName(fields[0]).
-			WithGuid(fields[1]).
-			WithCreateTxg(fields[2]).
-			WithCreation(fields[3]).
-			WithUserRefs(fields[4]).
-			Parse()
+		v, err := parseFilesystemVersion(filesystemVersionArgs{
+			FullName:  fields[0],
+			Guid:      fields[1],
+			CreateTxg: fields[2],
+			Creation:  fields[3],
+			UserRefs:  fields[4],
+			Clones:    fields[5],
+		})
 		if err != nil {
 			return nil, err
 		}

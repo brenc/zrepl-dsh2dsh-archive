@@ -20,8 +20,8 @@ import (
 	"github.com/dsh2dsh/zrepl/internal/logger"
 	"github.com/dsh2dsh/zrepl/internal/replication/driver"
 	"github.com/dsh2dsh/zrepl/internal/replication/logic"
+	"github.com/dsh2dsh/zrepl/internal/replication/logic/pdu"
 	"github.com/dsh2dsh/zrepl/internal/replication/report"
-	"github.com/dsh2dsh/zrepl/internal/zfs"
 )
 
 type ActiveSide struct {
@@ -429,7 +429,7 @@ func activeSide(g *config.Global, in *config.ActiveJob, configJob any,
 		j.preHook = NewHookFromConfig(in.Hooks.Pre)
 	}
 	if in.Hooks.Post != nil {
-		j.postHook = NewHookFromConfig(in.Hooks.Post).WithPostHook(true)
+		j.postHook = NewHookFromConfig(in.Hooks.Post)
 	}
 
 	if j.connected, err = connecter.FromConfig(&in.Connect); err != nil {
@@ -644,15 +644,6 @@ func (self *ActiveSideStatus) Progress() (expected, completed uint64) {
 	return expected, completed
 }
 
-func (j *ActiveSide) OwnedDatasetSubtreeRoot() (rfs *zfs.DatasetPath, ok bool) {
-	pull, ok := j.mode.(*modePull)
-	if !ok {
-		_ = j.mode.(*modePush) // make sure we didn't introduce a new job type
-		return nil, false
-	}
-	return pull.receiverConfig.RootWithoutClientComponent.Copy(), true
-}
-
 func (j *ActiveSide) SenderConfig() *endpoint.SenderConfig {
 	push, ok := j.mode.(*modePush)
 	if !ok {
@@ -713,22 +704,34 @@ func (j *ActiveSide) before(ctx context.Context) error {
 		}
 	})
 
+	if err := j.runLocalPreHook(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (j *ActiveSide) runLocalPreHook(ctx context.Context) error {
 	h := j.preHook
 	if h == nil {
 		return nil
 	}
+
 	log := GetLogger(ctx)
 	log.Info("run pre hook")
 
-	if err := h.Run(ctx, j); err != nil {
-		logger.WithError(
-			log.With(slog.Bool("err_is_fatal", h.ErrIsFatal())), err,
-			"pre hook exited with error")
-		err = fmt.Errorf("pre hook exited with error: %w", err)
-		j.updateTasks(func(tasks *activeSideTasks) { tasks.err = err })
-		if h.ErrIsFatal() {
-			return err
-		}
+	err := h.Run(ctx, j)
+	if err == nil {
+		return nil
+	}
+
+	errIsFatal := h.ErrIsFatal()
+	logger.WithError(
+		log.With(slog.Bool("err_is_fatal", errIsFatal)), err,
+		"pre hook exited with error")
+	err = fmt.Errorf("pre hook exited with error: %w", err)
+	j.updateTasks(func(tasks *activeSideTasks) { tasks.err = err })
+	if errIsFatal {
+		return err
 	}
 	return nil
 }
@@ -746,17 +749,19 @@ func (j *ActiveSide) snapshot(ctx context.Context) error {
 }
 
 func (j *ActiveSide) replicate(ctx context.Context) error {
+	if err := j.runRemotePreHook(ctx); err != nil {
+		return err
+	}
+
 	log := GetLogger(ctx)
 	log.Info("start replication")
 
 	var repWait driver.WaitFunc
-	sender, receiver := j.mode.SenderReceiver()
+	p := j.planner()
 	j.updateTasks(func(tasks *activeSideTasks) {
 		tasks.state = ActiveSideReplicating
-		tasks.replicationReport, repWait = driver.Do(
-			ctx, j.replicationDriverConfig, logic.NewPlanner(
-				j.promRepStateSecs, j.promBytesReplicated, sender, receiver,
-				j.mode.PlannerPolicy()))
+		tasks.replicationReport, repWait = driver.Do(ctx,
+			j.replicationDriverConfig, p)
 	})
 	repWait(true) // wait blocking
 
@@ -767,7 +772,52 @@ func (j *ActiveSide) replicate(ctx context.Context) error {
 		j.promLastSuccessful.SetToCurrentTime()
 	}
 	log.Info("finished replication")
+
+	j.runRemotePostHook(ctx)
 	return nil
+}
+
+func (j *ActiveSide) runRemotePreHook(ctx context.Context) error {
+	log := GetLogger(ctx)
+	log.Info("run remote pre hook")
+
+	err := j.connected.PreHook(ctx, &pdu.PassiveHookData{
+		Snapshots: j.Status().Snapshots(),
+	})
+	if err == nil {
+		return nil
+	}
+
+	logger.WithError(log, err, "failed remote pre hook")
+	err = fmt.Errorf("remote pre hook: %w", err)
+	j.updateTasks(func(tasks *activeSideTasks) { tasks.err = err })
+	return err
+}
+
+func (j *ActiveSide) runRemotePostHook(ctx context.Context) {
+	log := GetLogger(ctx)
+	log.Info("run remote post hook")
+
+	st := j.Status()
+	err := j.connected.PostHook(ctx, &pdu.PassiveHookData{
+		Snapshots:  st.Snapshots(),
+		Replicated: st.Replicated(),
+	})
+	if err == nil {
+		return
+	}
+
+	logger.WithError(log, err, "failed remote post hook")
+	j.updateTasks(func(tasks *activeSideTasks) {
+		tasks.err = fmt.Errorf("remote post hook: %w", err)
+	})
+}
+
+func (j *ActiveSide) planner() *logic.Planner {
+	sender, receiver := j.mode.SenderReceiver()
+	p := logic.NewPlanner(j.promRepStateSecs, j.promBytesReplicated,
+		sender, receiver, j.mode.PlannerPolicy())
+	return p
 }
 
 func (j *ActiveSide) pruneSender(ctx context.Context) error {
@@ -810,16 +860,22 @@ func (j *ActiveSide) pruneReceiver(ctx context.Context) error {
 }
 
 func (j *ActiveSide) afterPruning(ctx context.Context) error {
-	if j.postHook != nil {
-		log := GetLogger(ctx)
-		log.Info("run post hook")
-		if err := j.postHook.Run(ctx, j); err != nil {
-			logger.WithError(log, err, "post hook exited with error")
-			j.updateTasks(func(tasks *activeSideTasks) {
-				tasks.err = fmt.Errorf("post hook exited with error: %w", err)
-			})
-		}
+	if j.postHook == nil {
+		return nil
 	}
+
+	log := GetLogger(ctx)
+	log.Info("run post hook")
+
+	err := j.postHook.Run(ctx, j)
+	if err == nil {
+		return nil
+	}
+
+	logger.WithError(log, err, "post hook exited with error")
+	j.updateTasks(func(tasks *activeSideTasks) {
+		tasks.err = fmt.Errorf("post hook exited with error: %w", err)
+	})
 	return nil
 }
 

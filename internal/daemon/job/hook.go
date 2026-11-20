@@ -2,6 +2,7 @@ package job
 
 import (
 	"context"
+	"maps"
 	"time"
 
 	"github.com/dsh2dsh/zrepl/internal/config"
@@ -11,10 +12,13 @@ import (
 const (
 	envJobName = "ZREPL_JOB_NAME"
 	envJobErr  = "ZREPL_JOB_ERR"
+
+	envJobSnapshots  = "ZREPL_LOCAL_SNAPSHOTS"
+	envJobReplicated = "ZREPL_LOCAL_REPLICATED"
 )
 
 func NewHookFromConfig(in *config.HookCommand) *Hook {
-	return &Hook{
+	self := &Hook{
 		path: in.Path,
 		args: in.Args,
 		env:  in.Env,
@@ -22,6 +26,7 @@ func NewHookFromConfig(in *config.HookCommand) *Hook {
 		timeout:    in.Timeout,
 		errIsFatal: in.ErrIsFatal,
 	}
+	return self
 }
 
 type Hook struct {
@@ -31,33 +36,37 @@ type Hook struct {
 
 	timeout    time.Duration
 	errIsFatal bool
-	postHook   bool
-}
-
-func (self *Hook) WithPostHook(v bool) *Hook {
-	self.postHook = v
-	return self
 }
 
 func (self *Hook) ErrIsFatal() bool { return self.errIsFatal }
 
 func (self *Hook) Run(ctx context.Context, j Job) error {
+	return self.run(ctx, j, nil)
+}
+
+func (self *Hook) run(ctx context.Context, j Job, env map[string]string) error {
 	cmd := hooks.NewCommand(self.path, self.args...).
-		WithEnv(self.env, self.makeJobEnv(j)).
+		WithEnv(self.env, self.makeJobEnv(j, env)).
 		WithTimeout(self.timeout)
 	return cmd.Run(ctx)
 }
 
-func (self *Hook) makeJobEnv(j Job) map[string]string {
-	var jobErr string
-	if self.postHook {
-		if jobStatus := j.Status(); jobStatus != nil {
-			jobErr = jobStatus.Error()
-		}
+func (self *Hook) makeJobEnv(j Job, runtime map[string]string,
+) map[string]string {
+	env := make(map[string]string, 4+len(runtime))
+	env[envJobName] = j.Name()
+
+	if jobStatus := j.Status(); jobStatus != nil {
+		env[envJobErr] = jobStatus.Error()
+		env[envJobSnapshots] = jobStatus.Snapshots()
+		env[envJobReplicated] = jobStatus.Replicated()
 	}
-	env := map[string]string{
-		envJobName: j.Name(),
-		envJobErr:  jobErr,
-	}
+
+	maps.Copy(env, runtime)
 	return env
+}
+
+func (self *Hook) RunEnv(ctx context.Context, j Job, env map[string]string,
+) error {
+	return self.run(ctx, j, env)
 }

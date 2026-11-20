@@ -3,13 +3,33 @@ package middleware
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 
 	"github.com/dsh2dsh/zrepl/internal/client/jsonclient"
-	"github.com/dsh2dsh/zrepl/internal/logger"
 )
+
+func JsonRequest[T1 any](h func(ctx context.Context, req *T1) error,
+) Middleware {
+	fn := func(w http.ResponseWriter, r *http.Request) {
+		var req T1
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeErrorCode(w, r, http.StatusBadRequest, err,
+				"json unmarshal error",
+			)
+			return
+		}
+
+		err := h(r.Context(), &req)
+		if err != nil {
+			writeError(w, r, err, "handler error")
+			return
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+	}
+	return func(next http.Handler) http.Handler { return http.HandlerFunc(fn) }
+}
 
 func JsonResponder[T any](h func(context.Context) (*T, error)) Middleware {
 	fn := func(w http.ResponseWriter, r *http.Request) {
@@ -24,22 +44,6 @@ func JsonResponder[T any](h func(context.Context) (*T, error)) Middleware {
 		}
 	}
 	return func(next http.Handler) http.Handler { return http.HandlerFunc(fn) }
-}
-
-func writeError(w http.ResponseWriter, r *http.Request, err error, msg string,
-) {
-	statusCode := http.StatusInternalServerError
-	if httpErr, ok := errors.AsType[*HttpError](err); ok {
-		statusCode = httpErr.StatusCode()
-	}
-	writeErrorCode(w, r, statusCode, err, msg)
-}
-
-func writeErrorCode(w http.ResponseWriter, r *http.Request, statusCode int,
-	err error, msg string,
-) {
-	logger.WithError(getLogger(r), err, msg)
-	http.Error(w, err.Error(), statusCode)
 }
 
 func JsonRequestResponder[T1, T2 any](h func(ctx context.Context, req *T1,

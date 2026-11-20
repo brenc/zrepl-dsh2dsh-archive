@@ -15,6 +15,10 @@ type Filesystem struct {
 	Path          string `json:"Path,omitempty"`
 	ResumeToken   string `json:"ResumeToken,omitempty"`
 	IsPlaceholder bool   `json:"IsPlaceholder,omitempty"`
+
+	Replicate  bool   `json:"Replicate,omitempty"`
+	Exclude    string `json:"Exclude,omitempty"`
+	Replicated bool   `json:"Replicated,omitempty"`
 }
 
 func (x *Filesystem) GetPath() string {
@@ -66,6 +70,8 @@ type FilesystemVersion struct {
 	Guid      uint64                        `json:"Guid,omitempty"`
 	CreateTXG uint64                        `json:"CreateTXG,omitempty"`
 	Creation  string                        `json:"Creation,omitempty"` // RFC 3339
+	UserRefs  uint64                        `json:"UserRefs,omitempty"`
+	Clones    string                        `json:"Clones,omitempty"`
 }
 
 type FilesystemVersion_VersionType int32
@@ -113,9 +119,12 @@ func (x *FilesystemVersion) GetCreation() string {
 type SendReq struct {
 	Filesystem string `json:"Filesystem,omitempty"`
 	// May be empty / null to request a full transfer of To
-	From  *FilesystemVersion `json:"From,omitempty"`
-	To    *FilesystemVersion `json:"To,omitempty"`
-	Multi bool               `json:"Multi,omitempty"`
+	From      *FilesystemVersion `json:"From,omitempty"`
+	To        *FilesystemVersion `json:"To,omitempty"`
+	Multi     bool               `json:"Multi,omitempty"`
+	Replicate bool               `json:"Replicate,omitempty"`
+	Exclude   string             `json:"Exclude,omitempty"`
+
 	// If ResumeToken is not empty, the resume token that CAN be used for 'zfs
 	// send' by the sender. The sender MUST indicate use of ResumeToken in the
 	// reply message SendRes.UsedResumeToken If it does not work, the sender
@@ -163,6 +172,8 @@ func (x *SendReq) GetReplicationConfig() *ReplicationConfig {
 
 type ReplicationConfig struct {
 	Protection *ReplicationConfigProtection `json:"protection,omitempty"`
+	Recursive  bool                         `json:"recursive,omitempty"`
+	Force      bool                         `json:"force,omitempty"`
 }
 
 type ReplicationConfigProtection struct {
@@ -371,4 +382,9 @@ type SendDryReq struct {
 
 type SendDryRes struct {
 	Items []SendRes `json:"Items,omitempty"`
+}
+
+type PassiveHookData struct {
+	Snapshots  string `json:"snapshots,omitempty"`
+	Replicated string `json:"replicated,omitempty"`
 }

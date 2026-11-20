@@ -11,8 +11,9 @@ import (
 
 	"github.com/dsh2dsh/zrepl/internal/cli"
 	"github.com/dsh2dsh/zrepl/internal/config"
-	"github.com/dsh2dsh/zrepl/internal/daemon/filters"
 	"github.com/dsh2dsh/zrepl/internal/zfs"
+	"github.com/dsh2dsh/zrepl/internal/zfs/dataset"
+	"github.com/dsh2dsh/zrepl/internal/zfs/filter"
 )
 
 var TestCmd = &cli.Subcommand{
@@ -67,7 +68,7 @@ func runTestFilterCmd(ctx context.Context, subcommand *cli.Subcommand, args []st
 		return fmt.Errorf("job type %T does not have filesystems filter", j)
 	}
 
-	f, err := filters.NewFromConfig(ff, df)
+	f, err := filter.NewFromConfig(ff, df)
 	if err != nil {
 		return fmt.Errorf("filter invalid: %w", err)
 	}
@@ -85,9 +86,9 @@ func runTestFilterCmd(ctx context.Context, subcommand *cli.Subcommand, args []st
 		}
 	}
 
-	fspaths := make([]*zfs.DatasetPath, len(fsnames))
+	fspaths := make([]*dataset.Path, len(fsnames))
 	for i, fsname := range fsnames {
-		path, err := zfs.NewDatasetPath(fsname)
+		path, err := dataset.NewPath(fsname)
 		if err != nil {
 			return err
 		}
@@ -98,7 +99,7 @@ func runTestFilterCmd(ctx context.Context, subcommand *cli.Subcommand, args []st
 	for _, in := range fspaths {
 		var res string
 		var errStr string
-		pass, err := f.Filter(in)
+		pass, err := f.Included(in)
 		switch {
 		case err != nil:
 			res = "ERROR"
@@ -138,7 +139,7 @@ var testPlaceholder = &cli.Subcommand{
 }
 
 func runTestPlaceholder(ctx context.Context, subcommand *cli.Subcommand, args []string) error {
-	var checkDPs []*zfs.DatasetPath
+	var checkDPs []*dataset.Path
 	var datasetWasExplicitArgument bool
 
 	// all actions first
@@ -149,7 +150,7 @@ func runTestPlaceholder(ctx context.Context, subcommand *cli.Subcommand, args []
 			return fmt.Errorf("could not list ZFS filesystems: %w", err)
 		}
 		for _, row := range out {
-			dp, err := zfs.NewDatasetPath(row[0])
+			dp, err := dataset.NewPath(row[0])
 			if err != nil {
 				panic(err)
 			}
@@ -157,7 +158,7 @@ func runTestPlaceholder(ctx context.Context, subcommand *cli.Subcommand, args []
 		}
 	} else {
 		datasetWasExplicitArgument = true
-		dp, err := zfs.NewDatasetPath(testPlaceholderArgs.ds)
+		dp, err := dataset.NewPath(testPlaceholderArgs.ds)
 		if err != nil {
 			return err
 		}

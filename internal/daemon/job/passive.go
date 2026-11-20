@@ -3,6 +3,7 @@ package job
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -11,7 +12,17 @@ import (
 	"github.com/dsh2dsh/zrepl/internal/daemon/job/signal"
 	"github.com/dsh2dsh/zrepl/internal/daemon/snapper"
 	"github.com/dsh2dsh/zrepl/internal/endpoint"
-	"github.com/dsh2dsh/zrepl/internal/zfs"
+	"github.com/dsh2dsh/zrepl/internal/logger"
+	"github.com/dsh2dsh/zrepl/internal/replication/logic/pdu"
+	"github.com/dsh2dsh/zrepl/internal/zfs/dataset"
+)
+
+const (
+	envClientIdentity = "ZREPL_CLIENT_IDENTITY"
+	envClientRoot     = "ZREPL_CLIENT_ROOT"
+	envSubtreeRoot    = "ZREPL_JOB_ROOT"
+	envHookSnapshots  = "ZREPL_REMOTE_SNAPSHOTS"
+	envHookReplicated = "ZREPL_REMOTE_REPLICATED"
 )
 
 type PassiveSide struct {
@@ -19,6 +30,9 @@ type PassiveSide struct {
 	name endpoint.JobID
 
 	clientKeys map[string]struct{}
+
+	preHook  *Hook
+	postHook *Hook
 }
 
 var _ Job = (*PassiveSide)(nil)
@@ -147,6 +161,13 @@ func passiveSideFromConfig(g *config.Global, in *config.PassiveJob,
 		return nil, err // no wrapping necessary
 	}
 
+	if in.Hooks.Pre != nil {
+		s.preHook = NewHookFromConfig(in.Hooks.Pre)
+	}
+	if in.Hooks.Post != nil {
+		s.postHook = NewHookFromConfig(in.Hooks.Post)
+	}
+
 	connecter.AddJob(s.Name(), s)
 	return s, nil
 }
@@ -219,17 +240,6 @@ func (self *PassiveStatus) Progress() (uint64, uint64) {
 	return 0, 0
 }
 
-func (j *PassiveSide) OwnedDatasetSubtreeRoot() (rfs *zfs.DatasetPath, ok bool,
-) {
-	sink, ok := j.mode.(*modeSink)
-	if !ok {
-		// make sure we didn't introduce a new job type
-		_ = j.mode.(*modeSource)
-		return nil, false
-	}
-	return sink.receiverConfig.RootWithoutClientComponent.Copy(), true
-}
-
 func (j *PassiveSide) SenderConfig() *endpoint.SenderConfig {
 	source, ok := j.mode.(*modeSource)
 	if !ok {
@@ -257,5 +267,81 @@ func (*PassiveSide) RegisterMetrics(registerer prometheus.Registerer) {}
 func (j *PassiveSide) Run(ctx context.Context) error {
 	j.mode.Run(signal.GracefulFrom(ctx))
 	GetLogger(ctx).Info("job exiting")
+	return nil
+}
+
+func (j *PassiveSide) PreHook(ctx context.Context, clientIdentity string,
+	remote *pdu.PassiveHookData,
+) error {
+	h := j.preHook
+	if h == nil {
+		return nil
+	}
+
+	log := GetLogger(ctx)
+	log.Info("run pre hook")
+
+	err := h.RunEnv(ctx, j, j.hookEnv(log, clientIdentity, remote))
+	if err != nil {
+		errIsFatal := h.ErrIsFatal()
+		logger.WithError(
+			log.With(slog.Bool("err_is_fatal", errIsFatal)), err,
+			"pre hook exited with error")
+		if errIsFatal {
+			return fmt.Errorf("pre hook exited with error: %w", err)
+		}
+	}
+	return nil
+}
+
+func (j *PassiveSide) hookEnv(log *slog.Logger, clientIdentity string,
+	remote *pdu.PassiveHookData,
+) map[string]string {
+	var subtreeRoot, clientRoot string
+	if p := j.ownedSubtreeRoot(); p != nil {
+		subtreeRoot = p.ToString()
+		p2, err := endpoint.ClientRoot(p, clientIdentity)
+		if err != nil {
+			logger.WithError(log, err, "unable build "+envClientRoot)
+		} else {
+			clientRoot = p2.ToString()
+		}
+	}
+
+	return map[string]string{
+		envClientIdentity: clientIdentity,
+		envClientRoot:     clientRoot,
+		envSubtreeRoot:    subtreeRoot,
+		envHookSnapshots:  remote.Snapshots,
+		envHookReplicated: remote.Replicated,
+	}
+}
+
+func (j *PassiveSide) ownedSubtreeRoot() *dataset.Path {
+	if sink, ok := j.mode.(*modeSink); ok {
+		return sink.receiverConfig.RootWithoutClientComponent
+	}
+
+	// make sure we didn't introduce a new job type
+	_ = j.mode.(*modeSource)
+	return nil
+}
+
+func (j *PassiveSide) PostHook(ctx context.Context, clientIdentity string,
+	remote *pdu.PassiveHookData,
+) error {
+	h := j.postHook
+	if h == nil {
+		return nil
+	}
+
+	log := GetLogger(ctx)
+	log.Info("run post hook")
+
+	err := h.RunEnv(ctx, j, j.hookEnv(log, clientIdentity, remote))
+	if err != nil {
+		logger.WithError(log, err, "post hook exited with error")
+		return fmt.Errorf("post hook exited with error: %w", err)
+	}
 	return nil
 }

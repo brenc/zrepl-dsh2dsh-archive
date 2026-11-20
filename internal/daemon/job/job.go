@@ -10,8 +10,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/dsh2dsh/zrepl/internal/daemon/logging"
+	"github.com/dsh2dsh/zrepl/internal/daemon/snapper"
 	"github.com/dsh2dsh/zrepl/internal/endpoint"
-	"github.com/dsh2dsh/zrepl/internal/zfs"
 )
 
 func GetLogger(ctx context.Context) *slog.Logger {
@@ -28,9 +28,6 @@ type Job interface {
 
 	Name() string
 	Status() *Status
-	// Jobs that return a subtree of the dataset hierarchy
-	// must return the root of that subtree as rfs and ok = true
-	OwnedDatasetSubtreeRoot() (rfs *zfs.DatasetPath, ok bool)
 	SenderConfig() *endpoint.SenderConfig
 	Runnable() bool
 	Cron() string
@@ -137,3 +134,29 @@ func (s *Status) CanSignal() string {
 func (s *Status) Steps() (expected, step int) { return s.JobSpecific.Steps() }
 
 func (s *Status) Progress() (uint64, uint64) { return s.JobSpecific.Progress() }
+
+func (s *Status) Snapshots() string {
+	if st := s.snapshotting(); st != nil {
+		return st.Snapshots()
+	}
+	return ""
+}
+
+func (s *Status) snapshotting() *snapper.Report {
+	switch v := s.JobSpecific.(type) {
+	case *ActiveSideStatus:
+		return v.Snapshotting
+	case *PassiveStatus:
+		return v.Snapper
+	case *SnapJobStatus:
+		return v.Snapshotting
+	}
+	return nil
+}
+
+func (s *Status) Replicated() string {
+	if v, ok := s.JobSpecific.(*ActiveSideStatus); ok && v.Replication != nil {
+		return v.Replication.Replicated()
+	}
+	return ""
+}

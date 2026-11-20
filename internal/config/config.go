@@ -14,8 +14,8 @@ import (
 
 type Option func(self *Config)
 
-func WithoutIncludes() Option {
-	return func(self *Config) { self.skipIncludes = true }
+func WithIncludeKeys() Option {
+	return func(self *Config) { self.includeKeys = true }
 }
 
 func New(opts ...Option) *Config {
@@ -33,7 +33,7 @@ type Config struct {
 	Jobs        []JobEnum `yaml:"jobs" validate:"min=1,dive"`
 	IncludeJobs string    `yaml:"include_jobs" validate:"omitempty,filepath"`
 
-	skipIncludes bool
+	includeKeys bool
 }
 
 func (c *Config) init(opts ...Option) *Config {
@@ -46,7 +46,15 @@ func (c *Config) init(opts ...Option) *Config {
 func (c *Config) lateInit(path string) error {
 	if len(c.Global.Logging) == 0 {
 		c.Global.Logging.SetDefaults()
-	} else if c.skipIncludes {
+	}
+
+	if jobs, err := appendYAML(path, c.IncludeJobs, c.Jobs); err != nil {
+		return err
+	} else if jobs != nil {
+		c.Jobs = jobs
+	}
+
+	if !c.includeKeys {
 		return nil
 	}
 
@@ -54,12 +62,6 @@ func (c *Config) lateInit(path string) error {
 		return err
 	} else if keys != nil {
 		c.Keys = keys
-	}
-
-	if jobs, err := appendYAML(path, c.IncludeJobs, c.Jobs); err != nil {
-		return err
-	} else if jobs != nil {
-		c.Jobs = jobs
 	}
 	return nil
 }
@@ -181,6 +183,7 @@ type PassiveJob struct {
 	ClientKeys       []string         `yaml:"client_keys" validate:"dive,required"`
 	Pruning          PruningLocal     `yaml:"pruning"`
 	MonitorSnapshots MonitorSnapshots `yaml:"monitor"`
+	Hooks            JobHooks         `yaml:"hooks"`
 }
 
 type SnapJob struct {
@@ -196,20 +199,21 @@ type SnapJob struct {
 type DatasetFilter struct {
 	Pattern   string `yaml:"pattern"`
 	Exclude   bool   `yaml:"exclude"`
-	Recursive bool   `yaml:"recursive" validate:"excluded_with=Shell"`
+	Recursive *bool  `yaml:"recursive" validate:"excluded_with=Shell"`
 	Shell     bool   `yaml:"shell" validate:"excluded_with=Recursive"`
 }
 
 type SendOptions struct {
-	ListPlaceholders bool `yaml:"list_placeholders"`
-	Encrypted        bool `yaml:"encrypted"`
-	Raw              bool `yaml:"raw" default:"true"`
-	SendProperties   bool `yaml:"send_properties"`
-	BackupProperties bool `yaml:"backup_properties"`
-	LargeBlocks      bool `yaml:"large_blocks"`
-	Compressed       bool `yaml:"compressed"`
-	EmbeddedData     bool `yaml:"embedded_data"`
-	Saved            bool `yaml:"saved"`
+	ListPlaceholders bool     `yaml:"list_placeholders"`
+	Encrypted        bool     `yaml:"encrypted"`
+	Raw              bool     `yaml:"raw" default:"true"`
+	SendProperties   bool     `yaml:"send_properties"`
+	BackupProperties bool     `yaml:"backup_properties"`
+	LargeBlocks      bool     `yaml:"large_blocks"`
+	Compressed       bool     `yaml:"compressed"`
+	EmbeddedData     bool     `yaml:"embedded_data"`
+	Saved            bool     `yaml:"saved"`
+	Exclude          []string `yaml:"exclude" validate:"dive,required"`
 
 	ExecPipe [][]string `yaml:"execpipe" validate:"dive,required"`
 }
@@ -232,6 +236,8 @@ type Replication struct {
 	Protection  ReplicationOptionsProtection  `yaml:"protection"`
 	Concurrency ReplicationOptionsConcurrency `yaml:"concurrency"`
 	Prefix      string                        `yaml:"prefix"`
+	Recursive   bool                          `yaml:"recursive"`
+	Force       bool                          `yaml:"force"`
 }
 
 type ReplicationOptionsProtection struct {
@@ -389,7 +395,7 @@ type LoggingOutletEnumList []LoggingOutletEnum
 func (l *LoggingOutletEnumList) SetDefaults() {
 	s := new(FileLoggingOutlet)
 	defaults.MustSet(s)
-	err := yaml.Unmarshal([]byte(`
+	err := yaml.Load([]byte(`
 type: "file"
 format: "text"
 hide_fields:
@@ -555,19 +561,18 @@ type HookCommand struct {
 	Path        string            `yaml:"path" validate:"required"`
 	Args        []string          `yaml:"args" validate:"dive,required"`
 	Env         map[string]string `yaml:"env" validate:"dive,keys,required,endkeys,required"`
-	Timeout     time.Duration     `yaml:"timeout" default:"1m" validate:"min=0s"`
+	Timeout     time.Duration     `yaml:"timeout" validate:"min=0s"`
 	Filesystems FilesystemsFilter `yaml:"filesystems"`
 	Datasets    []DatasetFilter   `yaml:"datasets" validate:"dive"`
 	ErrIsFatal  bool              `yaml:"err_is_fatal"`
 }
 
 func (self *HookCommand) UnmarshalYAML(value *yaml.Node) error {
-	type hookCommand HookCommand
-	v := (*hookCommand)(self)
-	if err := value.Decode(v); err != nil {
+	self.Timeout = time.Minute
+
+	type alias HookCommand
+	if err := value.Decode((*alias)(self)); err != nil {
 		return fmt.Errorf("UnmarshalYAML %T: %w", self, err)
-	} else if err := defaults.Set(v); err != nil {
-		return fmt.Errorf("set defaults for %T: %w", self, err)
 	}
 	return nil
 }
@@ -579,26 +584,22 @@ func enumUnmarshal(value *yaml.Node, types map[string]any) (any, error) {
 	if err := value.Decode(&in); err != nil {
 		return nil, fmt.Errorf("config: %w", err)
 	} else if in.Type == "" {
+		err := errors.New("must specify type")
 		return nil, &yaml.LoadErrors{
 			Errors: []*yaml.LoadError{
-				{
-					Err:    errors.New("must specify type"),
-					Line:   value.Line,
-					Column: value.Column,
-				},
+				yaml.NewLoadError(yaml.ConstructorStage, err.Error(),
+					yaml.Mark{Line: value.Line, Column: value.Column}, err),
 			},
 		}
 	}
 
 	v, ok := types[in.Type]
 	if !ok {
+		err := errors.New("invalid type name " + in.Type)
 		return nil, &yaml.LoadErrors{
 			Errors: []*yaml.LoadError{
-				{
-					Err:    errors.New("invalid type name " + in.Type),
-					Line:   value.Line,
-					Column: value.Column,
-				},
+				yaml.NewLoadError(yaml.ConstructorStage, err.Error(),
+					yaml.Mark{Line: value.Line, Column: value.Column}, err),
 			},
 		}
 	}
