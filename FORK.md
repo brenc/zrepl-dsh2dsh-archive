@@ -102,3 +102,7 @@ Do this every week or two. Upstream code is untrusted until reviewed.
 - Before pushing, read the full `git diff upstream/master...HEAD` yourself.
 - Don't send security findings as public PRs or issues before checking how
   upstream wants them reported.
+- Upstream closes anything that reads as AI-written without acting on it
+  (issue #82, a real bug, was closed with "LLM output detected"). Keep PR
+  descriptions and issues short, plain and written by a person, with a
+  concrete reproduction.
