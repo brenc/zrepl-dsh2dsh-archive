@@ -120,6 +120,10 @@ include_keys: "keys.yaml"
 
 global:
   zfs_bin: "${zfsBin()}"
+  # Set here, not as a listen: unix entry: zrepl's client commands (signal,
+  # status, monitor) only read global.control.sockpath.
+  control:
+    sockpath: "${paths.control}"
   logging:
     - type: "file"
       format: "text"
@@ -132,8 +136,6 @@ global:
 listen:
   - addr: "127.0.0.1:${PORT}"
     zfs: true
-  - unix: "${paths.control}"
-    control: true
   - addr: "127.0.0.1:${PORT + 1}"
     metrics: true
 
