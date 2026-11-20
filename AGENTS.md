@@ -2,7 +2,17 @@
 
 ## Project
 
-Fork of zrepl (ZFS backup & replication). Go 1.26, module path `github.com/dsh2dsh/zrepl`.
+Downstream fork of `dsh2dsh/zrepl` (ZFS backup & replication). Go 1.27, module path `github.com/dsh2dsh/zrepl`.
+
+## Fork workflow
+
+Read `FORK.md` before syncing upstream or preparing an upstream PR.
+
+- `main` carries fork-only files (this file, `FORK.md`, `fork/`). Upstream
+  rejects AI tooling, so these must never reach a PR branch.
+- Upstream PR work happens on `pr/<topic>` branches cut from
+  `upstream/master`, never from `main`. Run `git pr-check` before pushing one.
+- Don't rename the module path; it would make every upstream merge conflict.
 
 ## Setup
 
